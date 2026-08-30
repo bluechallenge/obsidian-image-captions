@@ -104,18 +104,16 @@ If you want to keep escaped pipes `\|` (in case you are using internal links), u
 
 You can apply CSS styling by targeting the `.image-captions-figure` and `.image-captions-caption` classes.
 
-## Limitations
+## External images
 
-External images won't show the caption in **Editing / Live Preview** mode. For example:
+External images show their caption in both Reading and Editing / Live Preview modes:
 
 ```markdown
-![Not visible in Editing mode](https://obsidian.md/logo.png)
+![Here is a caption](https://obsidian.md/logo.png)
 ```
 
-I couldn't find a reliable way of targeting them. Get in touch if you know a way to do this!
-
-Internal images are fine.
+Live Preview support for external images requires Obsidian 1.13 or newer.
 
 ---
 
-This plugin is based on concepts from https://github.com/bicarlsen/obsidian_image_caption
+This plugin was based on concepts from https://github.com/bicarlsen/obsidian_image_caption

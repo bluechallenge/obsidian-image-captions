@@ -67,7 +67,15 @@ export default class ImageCaptions extends Plugin {
     const img = imageEmbedContainer.querySelector('img, video')
     if (!img) return
     const width = imageEmbedContainer.getAttribute('width') || ''
-    const caption = this.getCaptionText(imageEmbedContainer)
+    /*
+    Internal embeds carry the alt/src attributes on the embed container itself.
+    External images in Live Preview (Obsidian 1.13+) get an attribute-less
+    container, with the caption on the img's alt attribute instead.
+    */
+    const isInternalEmbed = imageEmbedContainer.hasAttribute('src') || imageEmbedContainer.hasAttribute('alt')
+    const caption = isInternalEmbed
+      ? this.getCaptionText(imageEmbedContainer)
+      : this.getExternalImageCaptionText(img)
     const figure = imageEmbedContainer.querySelector('figure')
     if (figure || img.parentElement?.nodeName === 'FIGURE') {
       // Node has already been processed - check if the caption needs to be updated
@@ -79,9 +87,14 @@ export default class ImageCaptions extends Plugin {
     }
     /*
     Sync the width attribute from the embed container onto the image itself.
+    Only for internal embeds (which carry a src attribute on the container) -
+    external images in 1.13+ Live Preview get an attribute-less .image-embed
+    container and Obsidian sets the width on the img directly, so removing it
+    here would strip the user's specified size.
     Skip when nothing has changed, so the observer doesn't fight Obsidian's own
     width handling (e.g. during native image resizing in Obsidian 1.13+).
     */
+    if (!imageEmbedContainer.hasAttribute('src')) return
     if (width && img.getAttribute('width') !== width) {
       // Update the image width, if specified
       img.setAttribute('width', width)
@@ -164,6 +177,21 @@ export default class ImageCaptions extends Plugin {
     })
     parsed.text = captionText
     return parsed
+  }
+
+  /**
+   * Extract the caption from an external image in Live Preview (Obsidian 1.13+).
+   *
+   * When no caption is specified, Obsidian fills the img's alt attribute with the
+   * filename portion of the URL, so that case has to be detected and skipped.
+   */
+  getExternalImageCaptionText (img: Element): ParsedCaption {
+    const alt = img.getAttribute('alt') || ''
+    const src = img.getAttribute('src') || ''
+    if (alt === src.slice(src.lastIndexOf('/') + 1)) {
+      return { text: '', alignment: '' }
+    }
+    return this.getCaptionText(img)
   }
 
   /**
