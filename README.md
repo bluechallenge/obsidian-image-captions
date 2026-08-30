@@ -1,6 +1,6 @@
 ![](https://img.shields.io/github/license/alangrainger/obsidian-image-captions) ![](https://img.shields.io/github/v/release/alangrainger/obsidian-image-captions?style=flat-square) ![](https://img.shields.io/github/downloads/alangrainger/obsidian-image-captions/total)
 
-# Add image captions
+# Image Captions
 
 Add an image in this format:
 

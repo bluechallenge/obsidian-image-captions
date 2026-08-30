@@ -1,12 +1,18 @@
-import { Component, MarkdownPostProcessor, MarkdownRenderer, Plugin } from 'obsidian'
+import { Component, MarkdownPostProcessor, MarkdownRenderer, Plugin, WorkspaceWindow } from 'obsidian'
 import { CaptionSettings, CaptionSettingTab, DEFAULT_SETTINGS } from './settings'
 
 const filenamePlaceholder = '%'
 const filenameExtensionPlaceholder = '%.%'
+const alignmentKeywords = ['left', 'right', 'center']
+
+export interface ParsedCaption {
+  text: string;
+  alignment: string;
+}
 
 export default class ImageCaptions extends Plugin {
   settings: CaptionSettings
-  observer: MutationObserver
+  observers: Map<Document, MutationObserver> = new Map()
 
   async onload () {
     this.registerMarkdownPostProcessor(
@@ -16,63 +22,85 @@ export default class ImageCaptions extends Plugin {
     await this.loadSettings()
     this.addSettingTab(new CaptionSettingTab(this.app, this))
 
-    this.observer = new MutationObserver((mutations: MutationRecord[]) => {
+    // Watch every open window, plus any popout windows as they are opened/closed
+    this.observeDocument(activeDocument)
+    this.app.workspace.iterateAllLeaves(leaf => { this.observeDocument(leaf.view.containerEl.doc) })
+    this.registerEvent(this.app.workspace.on('window-open', (workspaceWindow: WorkspaceWindow) => {
+      this.observeDocument(workspaceWindow.doc)
+    }))
+    this.registerEvent(this.app.workspace.on('window-close', (workspaceWindow: WorkspaceWindow) => {
+      this.observers.get(workspaceWindow.doc)?.disconnect()
+      this.observers.delete(workspaceWindow.doc)
+    }))
+  }
+
+  /**
+   * Watch a document for changes to image embeds. Each Obsidian window has its own
+   * document, so one observer is registered per window.
+   */
+  observeDocument (doc: Document) {
+    if (this.observers.has(doc)) return
+    const observer = new MutationObserver((mutations: MutationRecord[]) => {
       mutations.forEach((rec: MutationRecord) => {
         if (rec.type === 'childList') {
           (<Element>rec.target)
             // Search for all .image-embed nodes. Could be <div> or <span>
             .querySelectorAll('.image-embed, .video-embed')
-            .forEach(async imageEmbedContainer => {
-              const img = imageEmbedContainer.querySelector('img, video')
-              const width = imageEmbedContainer.getAttribute('width') || ''
-              const captionText = this.getCaptionText(imageEmbedContainer)
-              if (!img) return
-              const figure = imageEmbedContainer.querySelector('figure')
-              const figCaption = imageEmbedContainer.querySelector('figcaption')
-              if (figure || img.parentElement?.nodeName === 'FIGURE') {
-                // Node has already been processed
-                // Check if the text needs to be updated
-                if (figCaption && captionText) {
-                  // Update the text in the existing element
-                  const children = await renderMarkdown(captionText, '', this) ?? [captionText]
-                  figCaption.replaceChildren(...children)
-                } else if (!captionText) {
-                  // The alt-text has been removed, so remove the custom <figure> element
-                  // and set it back to how it was originally with just the plain <img> element
-                  imageEmbedContainer.appendChild(img)
-                  figure?.remove()
-                }
-              } else {
-                if (captionText && captionText !== imageEmbedContainer.getAttribute('src')) {
-                  await this.insertFigureWithCaption(img as HTMLElement, imageEmbedContainer, captionText, '')
-                }
-              }
-              if (width) {
-                // Update the image width, if specified
-                img.setAttribute('width', width)
-              } else {
-                // It's critical to remove the empty width attribute, rather than setting it to ""
-                img.removeAttribute('width')
-              }
-            })
+            .forEach(imageEmbedContainer => { void this.processEmbedContainer(imageEmbedContainer) })
         }
       })
     })
-    this.observer.observe(document.body, {
+    observer.observe(doc.body, {
       subtree: true,
       childList: true
     })
+    this.observers.set(doc, observer)
   }
 
   /**
-   * Process an HTMLElement or Element to extract the caption text
-   * from the alt attribute.
+   * Add, update, or remove the caption on a single image/video embed container.
+   */
+  async processEmbedContainer (imageEmbedContainer: Element) {
+    // While Obsidian's native drag-resize handle is in use (Obsidian 1.13+), leave the
+    // embed alone - Obsidian is updating the image width on every frame of the drag
+    if (imageEmbedContainer.classList.contains('is-resizing')) return
+    const img = imageEmbedContainer.querySelector('img, video')
+    if (!img) return
+    const width = imageEmbedContainer.getAttribute('width') || ''
+    const caption = this.getCaptionText(imageEmbedContainer)
+    const figure = imageEmbedContainer.querySelector('figure')
+    if (figure || img.parentElement?.nodeName === 'FIGURE') {
+      // Node has already been processed - check if the caption needs to be updated
+      if (figure?.classList.contains('image-captions-figure')) {
+        await this.updateFigure(figure, caption)
+      }
+    } else if (caption.text || caption.alignment) {
+      await this.insertFigureWithCaption(img as HTMLElement, imageEmbedContainer, caption, '')
+    }
+    /*
+    Sync the width attribute from the embed container onto the image itself.
+    Skip when nothing has changed, so the observer doesn't fight Obsidian's own
+    width handling (e.g. during native image resizing in Obsidian 1.13+).
+    */
+    if (width && img.getAttribute('width') !== width) {
+      // Update the image width, if specified
+      img.setAttribute('width', width)
+    } else if (!width && img.hasAttribute('width')) {
+      // It's critical to remove the empty width attribute, rather than setting it to ""
+      img.removeAttribute('width')
+    }
+  }
+
+  /**
+   * Process an HTMLElement or Element to extract the caption text and any
+   * alignment keyword (left/right/center) from the alt attribute.
    *
    * Optionally use the image filename if the filenamePlaceholder is specified.
    *
    * @param img
    */
-  getCaptionText (img: HTMLElement | Element) {
+  getCaptionText (img: HTMLElement | Element): ParsedCaption {
+    const parsed: ParsedCaption = { text: '', alignment: '' }
     let captionText = img.getAttribute('alt') || ''
     const src = img.getAttribute('src') || ''
     // If a wikilink is in the format [[image.png#foo]], Obsidian changes the captionText
@@ -81,8 +109,25 @@ export default class ImageCaptions extends Plugin {
     if (captionText === src || edge === src) {
       // If no caption is specified then Obsidian puts the src in the alt attribute,
       // so we need to set a blank caption.
-      return ''
+      return parsed
     }
+
+    /*
+    Extract any alignment keyword. These arrive as extra pipe-delimited sections
+    of the alt text, e.g. ![[image.jpg|My caption|left]] gives an alt attribute
+    of "My caption|left".
+    */
+    const sections = captionText.split('|')
+    const kept: string[] = []
+    for (const section of sections) {
+      const keyword = section.trim().toLowerCase()
+      if (alignmentKeywords.includes(keyword)) {
+        parsed.alignment = keyword
+      } else {
+        kept.push(section)
+      }
+    }
+    captionText = kept.join('|')
 
     // Perform the regex, if any
     if (this.settings.captionRegex) {
@@ -93,7 +138,7 @@ export default class ImageCaptions extends Plugin {
         } else {
           captionText = ''
         }
-      } catch (e) {
+      } catch {
         // Invalid regex
       }
     }
@@ -117,7 +162,8 @@ export default class ImageCaptions extends Plugin {
     captionText = captionText.replace(/<<(.*?)>>/g, (_, linktext) => {
       return '[[' + linktext + ']]'
     })
-    return captionText
+    parsed.text = captionText
+    return parsed
   }
 
   /**
@@ -126,11 +172,11 @@ export default class ImageCaptions extends Plugin {
   externalImageProcessor (): MarkdownPostProcessor {
     return (el, ctx) => {
       el.findAll('img:not(.emoji), video')
-        .forEach(async img => {
-          const captionText = this.getCaptionText(img)
+        .forEach(img => {
+          const caption = this.getCaptionText(img)
           const parent = img.parentElement
-          if (parent && parent?.nodeName !== 'FIGURE' && captionText && captionText !== img.getAttribute('src')) {
-            await this.insertFigureWithCaption(img, parent, captionText, ctx.sourcePath)
+          if (parent && parent?.nodeName !== 'FIGURE' && (caption.text || caption.alignment)) {
+            void this.insertFigureWithCaption(img, parent, caption, ctx.sourcePath)
           }
         })
     }
@@ -144,19 +190,79 @@ export default class ImageCaptions extends Plugin {
    *   <figcaption>The caption text</figcaption>
    * </figure>
    *
+   * In Obsidian 1.13+ Live Preview the image lives inside an .image-wrapper element
+   * which also hosts the native resize handle, so in that case the whole wrapper is
+   * moved inside the <figure> instead, keeping the resize handle attached to the image.
+   *
    * @param {HTMLElement} imageEl - The original image element to insert inside the <figure>
    * @param {HTMLElement|Element} outerEl - Most likely the parent of the original <img>
-   * @param captionText
+   * @param caption
    * @param sourcePath
    */
-  async insertFigureWithCaption (imageEl: HTMLElement, outerEl: HTMLElement | Element, captionText: string, sourcePath: string) {
+  async insertFigureWithCaption (imageEl: HTMLElement, outerEl: HTMLElement | Element, caption: ParsedCaption, sourcePath: string) {
+    const parent = imageEl.parentElement
+    const content = parent?.classList.contains('image-wrapper') ? parent : imageEl
     const figure = outerEl.createEl('figure')
     figure.addClass('image-captions-figure')
-    figure.appendChild(imageEl)
-    const children = await renderMarkdown(captionText, sourcePath, this) ?? [captionText]
-    figure.createEl('figcaption', {
-      cls: 'image-captions-caption'
-    }).replaceChildren(...children)
+    this.setFigureAlignment(figure, caption.alignment)
+    figure.appendChild(content)
+    if (caption.text) {
+      await this.addFigCaption(figure, caption.text, sourcePath)
+    }
+  }
+
+  /**
+   * Update an existing figure created by this plugin: refresh the caption text and
+   * alignment, or unwrap the figure entirely if the caption has been removed.
+   */
+  async updateFigure (figure: HTMLElement, caption: ParsedCaption) {
+    const figCaption = figure.querySelector('figcaption')
+    if (!caption.text && !caption.alignment) {
+      // The alt-text has been removed, so remove the custom <figure> element
+      // and set it back to how it was originally
+      const content = figure.querySelector('.image-wrapper') || figure.querySelector('img, video')
+      if (content) {
+        figure.replaceWith(content)
+      } else {
+        figure.remove()
+      }
+      return
+    }
+    this.setFigureAlignment(figure, caption.alignment)
+    if (caption.text) {
+      if (figCaption?.dataset?.captionText !== caption.text) {
+        // Update the text in the existing element (or create it if needed)
+        figCaption?.remove()
+        await this.addFigCaption(figure, caption.text, '')
+      }
+    } else {
+      figCaption?.remove()
+    }
+  }
+
+  /**
+   * Render the caption markdown and append a <figcaption> element to the figure.
+   */
+  async addFigCaption (figure: HTMLElement, captionText: string, sourcePath: string) {
+    /*
+    The element (with its data attribute) is created before the async markdown
+    render, so overlapping observer passes see it and don't insert a duplicate.
+    */
+    const figCaption = figure.createEl('figcaption', {
+      cls: 'image-captions-caption',
+      attr: { 'data-caption-text': captionText }
+    })
+    const children = await renderMarkdown(this, captionText, sourcePath) ?? [captionText]
+    figCaption.replaceChildren(...children)
+  }
+
+  /**
+   * Toggle the alignment class (left/right/center) on a figure element.
+   */
+  setFigureAlignment (figure: HTMLElement, alignment: string) {
+    for (const keyword of alignmentKeywords) {
+      figure.classList.toggle('image-captions-' + keyword, keyword === alignment)
+    }
   }
 
   async loadSettings () {
@@ -168,24 +274,33 @@ export default class ImageCaptions extends Plugin {
   }
 
   onunload () {
-    this.observer.disconnect()
+    this.observers.forEach(observer => { observer.disconnect() })
+    this.observers.clear()
   }
 }
 
 /**
- * Easy-to-use version of MarkdownRenderer.renderMarkdown. Returns only the child nodes, rather than a container block.
+ * Easy-to-use version of MarkdownRenderer.render. Returns only the child nodes, rather than a container block.
+ * @param plugin
  * @param markdown
  * @param sourcePath
- * @param component - Typically you can just pass the plugin instance, but Liam from the Obsidian team says
- *   it's not a good practice (https://github.com/obsidianmd/obsidian-releases/pull/2263#issuecomment-1711864829).
- *   I'm currently struggling to find a proper way to do it.
  */
-export async function renderMarkdown (markdown: string, sourcePath: string, component: Component): Promise<NodeList | undefined> {
+export async function renderMarkdown (plugin: ImageCaptions, markdown: string, sourcePath: string): Promise<NodeList | undefined> {
   const el = createDiv()
-  await MarkdownRenderer.renderMarkdown(markdown, el, sourcePath, component)
-  for (const child of el.children) {
-    if (child.tagName.toLowerCase() === 'p') {
-      return child.childNodes
+  /*
+  Captions only contain inline markdown, so a short-lived component is enough -
+  nothing in the rendered output needs an ongoing lifecycle.
+  */
+  const component = new Component()
+  component.load()
+  try {
+    await MarkdownRenderer.render(plugin.app, markdown, el, sourcePath, component)
+    for (const child of el.children) {
+      if (child.tagName.toLowerCase() === 'p') {
+        return child.childNodes
+      }
     }
+  } finally {
+    component.unload()
   }
 }

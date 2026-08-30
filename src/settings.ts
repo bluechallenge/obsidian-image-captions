@@ -22,10 +22,6 @@ export class CaptionSettingTab extends PluginSettingTab {
 
     containerEl.empty()
 
-    new Setting(containerEl)
-      .setName('Advanced settings')
-      .setHeading()
-
     // Caption regex
     new Setting(containerEl)
       .setName('Caption regex')
