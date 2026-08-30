@@ -112,7 +112,6 @@ External images show their caption in both Reading and Editing / Live Preview mo
 ![Here is a caption](https://obsidian.md/logo.png)
 ```
 
-Live Preview support for external images requires Obsidian 1.13 or newer.
 
 ---
 
