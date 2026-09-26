@@ -9,6 +9,7 @@ import {
   prepareFuzzySearch,
   renderMatches,
   SearchResult,
+  setIcon,
   TFile
 } from 'obsidian'
 
@@ -20,7 +21,6 @@ const nonBlockSections = ['yaml', 'heading', 'thematicBreak']
 const maxBlockTextLength = 300
 
 const noteInstructions = [
-  { command: 'Tab', purpose: 'to complete' },
   { command: 'Type #', purpose: 'to link heading' },
   { command: 'Type ^', purpose: 'to link blocks' },
   { command: 'Type |', purpose: 'to change display text' }
@@ -40,26 +40,32 @@ interface BlockInfo {
 }
 
 interface LinkSuggestion {
-  file: TFile;
+  // Null only for display text on a link to a note which doesn't exist yet
+  file: TFile | null;
   heading?: string;
   level?: number;
   block?: BlockInfo;
+  // For display text, the link target (e.g. "Note#Heading") and the text typed after |
+  alias?: { target: string, text: string };
   title: string;
   match: SearchResult | null;
 }
 
 interface ParsedQuery {
-  kind: 'note' | 'heading' | 'block';
+  kind: 'note' | 'heading' | 'block' | 'alias';
+  // The note name, or for display text the whole link target, e.g. "Note#Heading"
   linkpath: string;
-  // The text typed after # or ^
+  // The text typed after # ^ or |
   search: string;
 }
 
 /**
  * Split what's been typed after << into the note name and any heading or block search:
- * "Note", "Note#Heading", or "Note^block" / "Note#^block".
+ * "Note", "Note#Heading", "Note^block" / "Note#^block", or "Note#Heading|Display text".
  */
 function parseQuery (query: string): ParsedQuery {
+  const pipe = query.indexOf('|')
+  if (pipe !== -1) return { kind: 'alias', linkpath: query.slice(0, pipe), search: query.slice(pipe + 1) }
   const hash = query.indexOf('#')
   const caret = query.indexOf('^')
   if (caret !== -1 && (hash === -1 || caret <= hash + 1)) {
@@ -81,7 +87,7 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
     super(app)
     this.limit = maxSuggestions
     this.setInstructions(noteInstructions)
-    // Tab completes a partial note name, leaving the popup open to carry on with # ^ or |
+    // Tab completes a partial note name and moves on to the display text, like typing |
     this.scope.register([], 'Tab', () => {
       if (!this.context) return
       const { editor, start, file } = this.context
@@ -89,6 +95,9 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
       if (query.kind !== 'note' || !query.linkpath) return
       const from = start.ch + 2
       this.completeNoteName(editor, start.line, from, from + query.linkpath.length, query.linkpath, file, true)
+      const cursor = editor.getCursor()
+      editor.replaceRange('|', cursor)
+      editor.setCursor({ line: cursor.line, ch: cursor.ch + 1 })
       return false
     })
   }
@@ -118,7 +127,7 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
       // Headings and blocks need a note, but a display text can be given for any file
       window.setTimeout(() => this.completeNoteName(editor, cursor.line, from, from + linkpath.length, linkpath, file, query.endsWith('|')))
     }
-    if (query.includes('>>') || query.includes('|')) return null
+    if (query.includes('>>') || query.split('|').length > 2) return null
     // When editing an existing <<link>>, replace the rest of it as well
     const rest = line.slice(cursor.ch).match(/^[^<>|\]]*>>/)
     return {
@@ -147,7 +156,7 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
    * The note suggested first for a partial name, skipping attachments as they have no headings.
    */
   getBestNote (linkpath: string): TFile | undefined {
-    return this.getFileSuggestions(linkpath).find(suggestion => suggestion.file.extension === 'md')?.file
+    return this.getFileSuggestions(linkpath).find(suggestion => suggestion.file?.extension === 'md')?.file ?? undefined
   }
 
   /**
@@ -164,7 +173,11 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
   getSuggestions (context: EditorSuggestContext): LinkSuggestion[] | Promise<LinkSuggestion[]> {
     const query = parseQuery(context.query)
     this.setInstructions(query.kind === 'note' ? noteInstructions : acceptInstructions)
-    if (query.kind === 'heading') {
+    if (query.kind === 'alias') {
+      const file = this.app.metadataCache.getFirstLinkpathDest(query.linkpath.replace(/#.*$/, ''), context.file?.path ?? '')
+      const text = query.search.trim()
+      return [{ file, alias: { target: query.linkpath, text }, title: text || 'Display text', match: null }]
+    } else if (query.kind === 'heading') {
       return this.getHeadingSuggestions(query.linkpath, query.search, context.file)
     } else if (query.kind === 'block') {
       return this.getBlockSuggestions(query.linkpath, query.search, context)
@@ -269,10 +282,14 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
     el.addClass('mod-complex')
     const content = el.createDiv({ cls: 'suggestion-content' })
     renderMatches(content.createDiv({ cls: 'suggestion-title' }), suggestion.title, suggestion.match?.matches ?? null)
-    if (suggestion.heading !== undefined) {
+    if (suggestion.alias) {
+      // Display text shows the link target underneath, and an arrow, as in Obsidian's own suggestions
+      content.createDiv({ cls: 'suggestion-note', text: suggestion.alias.target })
+      setIcon(el.createDiv({ cls: 'suggestion-aux' }).createSpan({ cls: 'suggestion-flair' }), 'forward')
+    } else if (suggestion.heading !== undefined) {
       // Headings show their level on the right, e.g. H2, as in Obsidian's own suggestions
       el.createDiv({ cls: 'suggestion-aux' }).createSpan({ cls: 'suggestion-flair', text: 'H' + suggestion.level })
-    } else if (!suggestion.block && suggestion.file.parent && !suggestion.file.parent.isRoot()) {
+    } else if (!suggestion.block && suggestion.file?.parent && !suggestion.file.parent.isRoot()) {
       content.createDiv({ cls: 'suggestion-note', text: suggestion.file.parent.path + '/' })
     }
   }
@@ -280,6 +297,12 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
   selectSuggestion (suggestion: LinkSuggestion) {
     if (!this.context) return
     const { editor, start, end, file } = this.context
+    if (suggestion.alias) {
+      const { target, text } = suggestion.alias
+      this.insertLink(editor, start, end, text ? `${target}|${text}` : target)
+      return
+    }
+    if (!suggestion.file) return
     /*
     Always include the note name, even for headings in the current note: in Live Preview,
     captions are rendered without knowing which note they're in, so <<#Heading>> can't resolve.
@@ -287,6 +310,10 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
     let linktext = this.app.metadataCache.fileToLinktext(suggestion.file, file?.path ?? '', true)
     if (suggestion.heading !== undefined) linktext += '#' + suggestion.heading
     if (suggestion.block) linktext += '#^' + (suggestion.block.id ?? this.addBlockId(suggestion.file, suggestion.block, editor, file))
+    this.insertLink(editor, start, end, linktext)
+  }
+
+  insertLink (editor: Editor, start: EditorPosition, end: EditorPosition, linktext: string) {
     const link = `<<${linktext}>>`
     editor.replaceRange(link, start, end)
     editor.setCursor({ line: start.line, ch: start.ch + link.length })
