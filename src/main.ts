@@ -22,7 +22,9 @@ export default class ImageCaptions extends Plugin {
 
     await this.loadSettings()
     this.addSettingTab(new CaptionSettingTab(this.app, this))
-    this.registerEditorSuggest(new CaptionLinkSuggest(this.app))
+    const linkSuggest = new CaptionLinkSuggest(this.app)
+    this.registerEditorSuggest(linkSuggest)
+    this.registerEditorExtension(linkSuggest.inputHandler())
 
     // Watch every open window, plus any popout windows as they are opened/closed
     this.observeDocument(activeDocument)
