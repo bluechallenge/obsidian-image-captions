@@ -64,6 +64,9 @@ To use Wikilinks, you'll need to swap your square brackets `[[]]` for angle brac
 ![[image.jpg|This is a caption with <<a Wikilink>>]]
 ```
 
+Typing `<<` in a caption suggests notes to link to, just like `[[` does elsewhere in Obsidian.
+Type `#` after the note name to link to a heading, or `|` to change the display text.
+
 ## Use filename as caption
 
 If you want to use the image filename as the caption, specify `%` as the sole text of your 
