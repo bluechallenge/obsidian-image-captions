@@ -1,5 +1,6 @@
 import { Component, MarkdownPostProcessor, MarkdownRenderer, Plugin, WorkspaceWindow } from 'obsidian'
 import { CaptionSettings, CaptionSettingTab, DEFAULT_SETTINGS } from './settings'
+import { CaptionLinkSuggest } from './linkSuggest'
 
 const filenamePlaceholder = '%'
 const filenameExtensionPlaceholder = '%.%'
@@ -21,6 +22,7 @@ export default class ImageCaptions extends Plugin {
 
     await this.loadSettings()
     this.addSettingTab(new CaptionSettingTab(this.app, this))
+    this.registerEditorSuggest(new CaptionLinkSuggest(this.app))
 
     // Watch every open window, plus any popout windows as they are opened/closed
     this.observeDocument(activeDocument)
