@@ -20,6 +20,7 @@ const nonBlockSections = ['yaml', 'heading', 'thematicBreak']
 const maxBlockTextLength = 300
 
 const noteInstructions = [
+  { command: 'Tab', purpose: 'to complete' },
   { command: 'Type #', purpose: 'to link heading' },
   { command: 'Type ^', purpose: 'to link blocks' },
   { command: 'Type |', purpose: 'to change display text' }
@@ -80,6 +81,16 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
     super(app)
     this.limit = maxSuggestions
     this.setInstructions(noteInstructions)
+    // Tab completes a partial note name, leaving the popup open to carry on with # ^ or |
+    this.scope.register([], 'Tab', () => {
+      if (!this.context) return
+      const { editor, start, file } = this.context
+      const query = parseQuery(this.context.query)
+      if (query.kind !== 'note' || !query.linkpath) return
+      const from = start.ch + 2
+      this.completeNoteName(editor, start.line, from, from + query.linkpath.length, query.linkpath, file, true)
+      return false
+    })
   }
 
   onTrigger (cursor: EditorPosition, editor: Editor, file: TFile | null): EditorSuggestTriggerInfo | null {
@@ -97,12 +108,17 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
     const linkStart = before.lastIndexOf('<<')
     if (linkStart < embedStart + 3 + pipe) return null
     const query = before.slice(linkStart + 2)
-    if (query.includes('>>') || query.includes('|')) return null
-    // Only when # or ^ has just been typed, not when moving the cursor into an existing <<Note#Heading>>
+    /*
+    Typing # ^ or | straight after a partial note name completes the name, as in Obsidian's own
+    suggestions - but not when moving the cursor into an existing <<Note#Heading>>
+    */
     const linkpath = query.slice(0, -1)
-    if (linkpath && /[#^]$/.test(query) && !/[#^]/.test(linkpath) && /^(>>|\\?\||\]\]|$)/.test(line.slice(cursor.ch))) {
-      this.completeNoteName(editor, cursor, linkpath, file)
+    if (linkpath && /[#^|]$/.test(query) && !/[#^|>]/.test(linkpath) && /^(>>|\\?\||\]\]|$)/.test(line.slice(cursor.ch))) {
+      const from = linkStart + 2
+      // Headings and blocks need a note, but a display text can be given for any file
+      window.setTimeout(() => this.completeNoteName(editor, cursor.line, from, from + linkpath.length, linkpath, file, query.endsWith('|')))
     }
+    if (query.includes('>>') || query.includes('|')) return null
     // When editing an existing <<link>>, replace the rest of it as well
     const rest = line.slice(cursor.ch).match(/^[^<>|\]]*>>/)
     return {
@@ -113,25 +129,22 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
   }
 
   /**
-   * Like Obsidian's own suggestions, typing # or ^ straight after a partial note name completes
-   * the name, e.g. <<loops# becomes <<Loops - Thinking Outside Your Head#
+   * Replace a partial note name with the full name of the best match, e.g. "loops" becomes
+   * "Loops - Thinking Outside Your Head". Names which already match a file are left alone.
+   * This can't run while the editor is still processing a keystroke, so onTrigger delays it.
    */
-  completeNoteName (editor: Editor, cursor: EditorPosition, linkpath: string, currentFile: TFile | null) {
+  completeNoteName (editor: Editor, line: number, from: number, to: number, linkpath: string, currentFile: TFile | null, anyFile: boolean) {
     const sourcePath = currentFile?.path ?? ''
     if (this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath)) return
-    const note = this.getBestNote(linkpath)
-    if (!note) return
-    const linktext = this.app.metadataCache.fileToLinktext(note, sourcePath, true)
-    const from = { line: cursor.line, ch: cursor.ch - 1 - linkpath.length }
-    const to = { line: cursor.line, ch: cursor.ch - 1 }
-    // The editor can't be changed while it is still processing the keystroke that triggered this
-    window.setTimeout(() => {
-      if (editor.getRange(from, to) === linkpath) editor.replaceRange(linktext, from, to)
-    })
+    const file = anyFile ? this.getFileSuggestions(linkpath)[0]?.file : this.getBestNote(linkpath)
+    if (!file) return
+    const range = { from: { line, ch: from }, to: { line, ch: to } }
+    if (editor.getRange(range.from, range.to) !== linkpath) return
+    editor.replaceRange(this.app.metadataCache.fileToLinktext(file, sourcePath, true), range.from, range.to)
   }
 
   /**
-   * The note suggested first for a partial name. Attachments are skipped, as they have no headings.
+   * The note suggested first for a partial name, skipping attachments as they have no headings.
    */
   getBestNote (linkpath: string): TFile | undefined {
     return this.getFileSuggestions(linkpath).find(suggestion => suggestion.file.extension === 'md')?.file
