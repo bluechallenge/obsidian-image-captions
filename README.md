@@ -65,7 +65,8 @@ To use Wikilinks, you'll need to swap your square brackets `[[]]` for angle brac
 ```
 
 Typing `<<` in a caption suggests notes to link to, just like `[[` does elsewhere in Obsidian.
-Type `#` after the note name to link to a heading, or `|` to change the display text.
+Type `#` after the note name to link to a heading, `^` to link to a block, or `|` to change the
+display text. As with `[[`, linking to a block that has no ID yet adds one to that note.
 
 ## Use filename as caption
 
