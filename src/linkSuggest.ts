@@ -1,3 +1,5 @@
+import { Extension } from '@codemirror/state'
+import { EditorView } from '@codemirror/view'
 import {
   App,
   Editor,
@@ -5,6 +7,7 @@ import {
   EditorSuggest,
   EditorSuggestContext,
   EditorSuggestTriggerInfo,
+  editorInfoField,
   Pos,
   prepareFuzzySearch,
   renderMatches,
@@ -26,6 +29,8 @@ const noteInstructions = [
   { command: 'Type |', purpose: 'to change display text' }
 ]
 const acceptInstructions = [{ command: '↵', purpose: 'to accept' }]
+// Characters which complete a partial note name when typed after it
+const completionTriggers = ['#', '^', '|']
 
 interface BlockInfo {
   // The existing block ID, if the block already has one
@@ -78,6 +83,25 @@ function parseQuery (query: string): ParsedQuery {
 }
 
 /**
+ * If the cursor is inside an unclosed << in the caption of an image/video embed, return the
+ * position of the <<, otherwise null.
+ */
+function findCaptionLink (line: string, ch: number): number | null {
+  const before = line.slice(0, ch)
+  // The cursor must be in the caption of an image/video embed which is still open
+  const embedStart = before.lastIndexOf('![[')
+  if (embedStart === -1 || before.includes(']]', embedStart)) return null
+  const embed = before.slice(embedStart + 3)
+  const pipe = embed.search(/\\?\|/)
+  if (pipe === -1) return null
+  const extension = embed.slice(0, pipe).replace(/#.*$/, '').split('.').pop()?.toLowerCase() || ''
+  if (!mediaExtensions.includes(extension)) return null
+  // ...and inside an unclosed <<
+  const linkStart = before.lastIndexOf('<<')
+  return linkStart < embedStart + 3 + pipe ? null : linkStart
+}
+
+/**
  * Suggest notes after `<<` is typed in an image caption, headings after `#`, and blocks after `^`,
  * the same way Obsidian suggests them after `[[` elsewhere. Wikilinks in captions have to be written with
  * angle brackets, e.g. ![[image.jpg|See <<My note>>]], which Obsidian's own suggestions don't cover.
@@ -104,27 +128,16 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
 
   onTrigger (cursor: EditorPosition, editor: Editor, file: TFile | null): EditorSuggestTriggerInfo | null {
     const line = editor.getLine(cursor.line)
-    const before = line.slice(0, cursor.ch)
-    // The cursor must be in the caption of an image/video embed which is still open
-    const embedStart = before.lastIndexOf('![[')
-    if (embedStart === -1 || before.includes(']]', embedStart)) return null
-    const embed = before.slice(embedStart + 3)
-    const pipe = embed.search(/\\?\|/)
-    if (pipe === -1) return null
-    const extension = embed.slice(0, pipe).replace(/#.*$/, '').split('.').pop()?.toLowerCase() || ''
-    if (!mediaExtensions.includes(extension)) return null
-    // ...and inside an unclosed <<, before any | for the display text
-    const linkStart = before.lastIndexOf('<<')
-    if (linkStart < embedStart + 3 + pipe) return null
-    const query = before.slice(linkStart + 2)
+    const linkStart = findCaptionLink(line, cursor.ch)
+    if (linkStart === null) return null
+    const query = line.slice(linkStart + 2, cursor.ch)
     /*
-    Typing # ^ or | straight after a partial note name completes the name, as in Obsidian's own
-    suggestions - but not when moving the cursor into an existing <<Note#Heading>>
+    Typing # ^ or | after a partial note name normally completes it in inputHandler(). This catches
+    any input which doesn't go through there, such as some input methods.
     */
     const linkpath = query.slice(0, -1)
-    if (linkpath && /[#^|]$/.test(query) && !/[#^|>]/.test(linkpath) && /^(>>|\\?\||\]\]|$)/.test(line.slice(cursor.ch))) {
+    if (completionTriggers.includes(query.slice(-1)) && this.canComplete(linkpath, line.slice(cursor.ch))) {
       const from = linkStart + 2
-      // Headings and blocks need a note, but a display text can be given for any file
       window.setTimeout(() => this.completeNoteName(editor, cursor.line, from, from + linkpath.length, linkpath, file, query.endsWith('|')))
     }
     if (query.includes('>>') || query.split('|').length > 2) return null
@@ -138,18 +151,63 @@ export class CaptionLinkSuggest extends EditorSuggest<LinkSuggestion> {
   }
 
   /**
-   * Replace a partial note name with the full name of the best match, e.g. "loops" becomes
-   * "Loops - Thinking Outside Your Head". Names which already match a file are left alone.
-   * This can't run while the editor is still processing a keystroke, so onTrigger delays it.
+   * Complete a partial note name when # ^ or | is typed after it. Obsidian's tag suggestions open
+   * on a space followed by #, as in "<<Loops #", and then these suggestions aren't asked, so the
+   * keystroke is watched here instead. The character is typed as normal, and the name is
+   * replaced straight afterwards - changing the text during the keystroke upsets Live Preview.
+   * Once the space is gone, the tag suggestions close and these ones take over.
+   */
+  inputHandler (): Extension {
+    return EditorView.inputHandler.of((view, from, to, text) => {
+      if (!completionTriggers.includes(text) || from !== to) return false
+      const line = view.state.doc.lineAt(from)
+      const ch = from - line.from
+      const linkStart = findCaptionLink(line.text, ch)
+      if (linkStart === null) return false
+      const linkpath = line.text.slice(linkStart + 2, ch)
+      if (!this.canComplete(linkpath, line.text.slice(ch))) return false
+      const sourcePath = view.state.field(editorInfoField, false)?.file?.path ?? ''
+      const linktext = this.getCompletedName(linkpath, sourcePath, text === '|')
+      if (linktext === null) return false
+      const start = line.from + linkStart + 2
+      window.setTimeout(() => {
+        // Only if the text is still as it was once the character went in
+        if (view.state.sliceDoc(start, from + text.length) !== linkpath + text) return
+        view.dispatch({ changes: { from: start, to: from, insert: linktext } })
+      })
+      return false
+    })
+  }
+
+  /**
+   * Whether a note name can be completed: it must be a plain partial name, and the cursor must
+   * be at the end of the link, not moving into an existing <<Note#Heading>>.
+   */
+  canComplete (linkpath: string, after: string): boolean {
+    return !!linkpath.trim() && !/[#^|>]/.test(linkpath) && /^(>>|\\?\||\]\]|$)/.test(after)
+  }
+
+  /**
+   * The full name for a partial note name, e.g. "loops" gives "Loops - Thinking Outside Your Head",
+   * or null if there's nothing to complete. Headings and blocks need a note, but display text can be given
+   * for any file, so `anyFile` allows attachments too.
+   */
+  getCompletedName (linkpath: string, sourcePath: string, anyFile: boolean): string | null {
+    const name = linkpath.trim()
+    // A complete name only needs any spaces before the # or | removed
+    if (this.app.metadataCache.getFirstLinkpathDest(name, sourcePath)) return name === linkpath ? null : name
+    const file = anyFile ? this.getFileSuggestions(name)[0]?.file : this.getBestNote(name)
+    return file ? this.app.metadataCache.fileToLinktext(file, sourcePath, true) : null
+  }
+
+  /**
+   * Replace a partial note name in the editor with its full name.
    */
   completeNoteName (editor: Editor, line: number, from: number, to: number, linkpath: string, currentFile: TFile | null, anyFile: boolean) {
-    const sourcePath = currentFile?.path ?? ''
-    if (this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath)) return
-    const file = anyFile ? this.getFileSuggestions(linkpath)[0]?.file : this.getBestNote(linkpath)
-    if (!file) return
+    const linktext = this.getCompletedName(linkpath, currentFile?.path ?? '', anyFile)
     const range = { from: { line, ch: from }, to: { line, ch: to } }
-    if (editor.getRange(range.from, range.to) !== linkpath) return
-    editor.replaceRange(this.app.metadataCache.fileToLinktext(file, sourcePath, true), range.from, range.to)
+    if (linktext === null || editor.getRange(range.from, range.to) !== linkpath) return
+    editor.replaceRange(linktext, range.from, range.to)
   }
 
   /**
