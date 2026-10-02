@@ -5,6 +5,12 @@ import { CaptionLinkSuggest } from './linkSuggest'
 const filenamePlaceholder = '%'
 const filenameExtensionPlaceholder = '%.%'
 const alignmentKeywords = ['left', 'right', 'center']
+/*
+Obsidian can't display .heic files, so it renders them as generic file embeds.
+The HEIC Viewer plugin then adds its own converted <img class="heic-image"> inside.
+*/
+const heicEmbedSelector = '.internal-embed:has(> img.heic-image)'
+const embedSelector = '.image-embed, .video-embed, ' + heicEmbedSelector
 
 export interface ParsedCaption {
   text: string;
@@ -47,10 +53,12 @@ export default class ImageCaptions extends Plugin {
     const observer = new MutationObserver((mutations: MutationRecord[]) => {
       mutations.forEach((rec: MutationRecord) => {
         if (rec.type === 'childList') {
-          (<Element>rec.target)
-            // Search for all .image-embed nodes. Could be <div> or <span>
-            .querySelectorAll('.image-embed, .video-embed')
+          const target = <Element>rec.target
+          // Search for all .image-embed nodes. Could be <div> or <span>
+          target.querySelectorAll(embedSelector)
             .forEach(imageEmbedContainer => { void this.processEmbedContainer(imageEmbedContainer) })
+          // HEIC Viewer adds its <img> straight into the embed, so the embed itself is the target
+          if (target.matches(heicEmbedSelector)) void this.processEmbedContainer(target)
         }
       })
     })
@@ -236,6 +244,8 @@ export default class ImageCaptions extends Plugin {
     const content = parent?.classList.contains('image-wrapper') ? parent : imageEl
     const figure = outerEl.createEl('figure')
     figure.addClass('image-captions-figure')
+    // HEIC Viewer hides any child of the embed without its 'heic-own' class
+    if (imageEl.hasClass('heic-own')) figure.addClass('heic-own')
     this.setFigureAlignment(figure, caption.alignment)
     figure.appendChild(content)
     if (caption.text) {
